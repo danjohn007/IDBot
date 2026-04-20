@@ -55,7 +55,33 @@ CREATE TABLE `users` (
   `email` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
   `event_name` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
   `chosen_option` varchar(10) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `appointment_interest` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `appointment_mode` varchar(20) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `appointment_date` date DEFAULT NULL,
+  `appointment_time` time DEFAULT NULL,
   `state` varchar(50) COLLATE utf8_unicode_ci NOT NULL DEFAULT 'WAITING_NAME',
+  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+
+-- --------------------------------------------------------
+
+--
+-- Estructura de tabla para la tabla `appointments`
+--
+
+CREATE TABLE `appointments` (
+  `id` int(11) NOT NULL,
+  `user_id` int(11) NOT NULL,
+  `phone` varchar(20) COLLATE utf8_unicode_ci NOT NULL,
+  `name` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `email` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `company` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `event_name` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `interest` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+  `mode` varchar(20) COLLATE utf8_unicode_ci NOT NULL DEFAULT 'PRESENCIAL',
+  `appointment_at` datetime NOT NULL,
+  `meeting_link` varchar(500) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `status` varchar(50) COLLATE utf8_unicode_ci NOT NULL DEFAULT 'SCHEDULED',
   `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
 
@@ -123,6 +149,13 @@ ALTER TABLE `users`
   ADD UNIQUE KEY `phone` (`phone`);
 
 --
+-- Indices de la tabla `appointments`
+--
+ALTER TABLE `appointments`
+  ADD PRIMARY KEY (`id`),
+  ADD KEY `user_id` (`user_id`);
+
+--
 -- Indices de la tabla `works`
 --
 ALTER TABLE `works`
@@ -152,6 +185,12 @@ ALTER TABLE `users`
   MODIFY `id` int(11) NOT NULL AUTO_INCREMENT;
 
 --
+-- AUTO_INCREMENT de la tabla `appointments`
+--
+ALTER TABLE `appointments`
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT;
+
+--
 -- AUTO_INCREMENT de la tabla `works`
 --
 ALTER TABLE `works`
@@ -172,6 +211,12 @@ ALTER TABLE `work_images`
 --
 ALTER TABLE `work_images`
   ADD CONSTRAINT `work_images_ibfk_1` FOREIGN KEY (`work_id`) REFERENCES `works` (`id`) ON DELETE CASCADE;
+
+--
+-- Filtros para la tabla `appointments`
+--
+ALTER TABLE `appointments`
+  ADD CONSTRAINT `appointments_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE;
 COMMIT;
 
 /*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;
