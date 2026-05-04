@@ -312,8 +312,8 @@ function farewellMsg(name) {
 
 function isGreeting(text) {
   const normalized = normalizeText(text);
-  const greetings = ["hola", "hi", "hello", "buenas", "hey"];
-  return greetings.some((greeting) => normalized === greeting || normalized.startsWith(`${greeting} `));
+  const greetings = ["hola", "hi", "hello", "buenas", "buenos", "buen", "hey", "saludos", "que tal", "que hay"];
+  return greetings.some((greeting) => normalized === greeting || normalized.startsWith(`${greeting} `) || normalized.startsWith(`${greeting},`));
 }
 
 function normalizeText(text) {
@@ -343,13 +343,44 @@ function hasIdInterest(text) {
   return /\bid\s+[a-z0-9]+(?:\s+[a-z0-9]+){0,2}\b/.test(normalized);
 }
 
+function hasInfoRequest(text) {
+  const normalized = normalizeText(text);
+  const infoKeywords = [
+    "necesito informacion",
+    "quiero informacion",
+    "necesito info",
+    "quiero info",
+    "dame informacion",
+    "dame info",
+    "me interesa",
+    "quiero saber",
+    "necesito saber",
+    "busco informacion",
+    "tengo una pregunta",
+    "quisiera informacion",
+    "podrian informarme",
+    "pueden informarme",
+    "quiero conocer",
+    "necesito conocer",
+  ];
+  return infoKeywords.some((kw) => normalized.includes(kw));
+}
+
 function shouldRestartFlow(text) {
-  return isGreeting(text) || hasIdInterest(text);
+  return isGreeting(text) || hasIdInterest(text) || hasInfoRequest(text);
 }
 
 async function sendMainOptions(wa, greeting) {
   await sendButtons(wa, greeting, [
     { id: "opt_contacto", title: "📞 Contacto de Andy" },
+    { id: "opt_portafolio", title: "📂 Portafolio" },
+    { id: "opt_cita", title: "📅 Asignar una cita" },
+  ]);
+}
+
+// Solo portafolio y cita (sin contacto), para cuando el usuario pregunta por un producto
+async function sendProductOptions(wa, greeting) {
+  await sendButtons(wa, greeting, [
     { id: "opt_portafolio", title: "📂 Portafolio" },
     { id: "opt_cita", title: "📅 Asignar una cita" },
   ]);
@@ -592,18 +623,38 @@ async function processMessage(db, from, msgType, payload, wa) {
 
   const user = rows[0];
 
-  // ── "Hola" → usuario recurrente directo a opciones / nuevo pide nombre ──
-  if (msgType === "text" && shouldRestartFlow(text)) {
+  // ── Reinicio de flujo según tipo de mensaje ──
+  // No interrumpir si el usuario está en medio del flujo de cita o registro
+  const statesNoRestart = [
+    "WAITING_APPOINTMENT_INTEREST",
+    "WAITING_APPOINTMENT_MODE",
+    "WAITING_APPOINTMENT_DATE",
+    "WAITING_APPOINTMENT_TIME",
+    "WAITING_APPOINTMENT_CONFIRM",
+    "WAITING_NAME",
+    "WAITING_EMAIL",
+    "WAITING_EVENT",
+    "WAITING_COMPANY",
+  ];
+  if (msgType === "text" && shouldRestartFlow(text) && !statesNoRestart.includes(user.state)) {
     if (user.name && user.email && user.company) {
-      // Usuario completo → directo a opciones
       await db.execute(
         "UPDATE users SET state = 'WAITING_OPTION', chosen_option = NULL, appointment_interest = NULL, appointment_mode = NULL, appointment_date = NULL, appointment_time = NULL WHERE phone = ?",
         [from]
       );
-      await sendMainOptions(
-        wa,
-        `¡Hola de nuevo *${user.name}*! 👋 Qué gusto verte por aquí otra vez.\n\n¿Qué te gustaría hacer?`
-      );
+      // Si menciona un producto o pide información → sin botón de contacto
+      if (hasIdInterest(text) || hasInfoRequest(text)) {
+        await sendProductOptions(
+          wa,
+          `Hola *${user.name}* 👋 Con gusto te ayudo.\n\n¿Qué te gustaría hacer?`
+        );
+      } else {
+        // Saludo simple → menú completo con contacto
+        await sendMainOptions(
+          wa,
+          `¡Hola de nuevo *${user.name}*! 👋 Qué gusto verte por aquí otra vez.\n\n¿Qué te gustaría hacer?`
+        );
+      }
     } else {
       // Datos incompletos → reiniciar registro
       await db.execute(
@@ -613,6 +664,64 @@ async function processMessage(db, from, msgType, payload, wa) {
       await sendText(wa, GREETING_MSG);
     }
     return;
+  }
+
+  // ── Botones de navegación global (funcionan desde cualquier estado) ──
+  // Esto evita errores cuando el usuario regresa y presiona un botón de un mensaje anterior.
+  if (buttonId && user.name) {
+    if (buttonId === "opt_contacto") {
+      await db.execute("UPDATE users SET chosen_option = 'a', state = 'WAITING_AFTER_CONTACT' WHERE phone = ?", [from]);
+      await sendText(wa, "Te comparto el contacto de Andy Raso 📱\n\nEnvíale un mensaje para que te guarde en su agenda VIP.");
+      await sendContact(wa);
+      await sendButtons(wa, "¿Qué quieres hacer ahora?", [
+        { id: "after_contact_portafolio", title: "📂 Ver portafolio" },
+        { id: "after_contact_cita", title: "📅 Agendar cita" },
+      ]);
+      return;
+    }
+    if (buttonId === "opt_portafolio" || buttonId === "after_contact_portafolio" || buttonId === "more_yes") {
+      await db.execute("UPDATE users SET chosen_option = 'b', state = 'WAITING_WORK' WHERE phone = ?", [from]);
+      await sendWorksList(db, wa);
+      return;
+    }
+    if (buttonId === "opt_cita" || buttonId === "after_contact_cita" || buttonId === "more_appointment") {
+      await db.execute("UPDATE users SET chosen_option = 'c' WHERE phone = ?", [from]);
+      await startAppointmentFlow(db, wa, from, user.appointment_interest || "");
+      return;
+    }
+    if (buttonId === "more_no") {
+      await db.execute("UPDATE users SET state = 'DONE' WHERE phone = ?", [from]);
+      await sendText(wa, farewellMsg(user.name));
+      return;
+    }
+    if (buttonId.startsWith("work_")) {
+      const workId = parseInt(buttonId.replace("work_", ""), 10);
+      const [works] = await db.execute("SELECT * FROM works WHERE id = ?", [workId]);
+      if (works.length === 0) {
+        await sendText(wa, "No encontré ese portafolio. Intenta de nuevo.");
+        await sendWorksList(db, wa);
+        return;
+      }
+      const work = works[0];
+      if (work.pdf_url) {
+        try {
+          await sendDocument(wa, work.pdf_url, `${work.name}.pdf`, `📄 ${work.name}\n\nCuando lo hayas revisado, envía cualquier mensaje para continuar.`);
+        } catch (docErr) {
+          logger.error("Error enviando PDF de portafolio", {
+            workId,
+            workName: work.name,
+            pdfUrl: work.pdf_url,
+            waTo: wa.to,
+            error: docErr?.response?.data || docErr?.message || docErr,
+          });
+          await sendText(wa, `⚠️ No pude enviar el PDF de *${work.name}* en este momento.\n\nNuestro equipo ya fue notificado para corregirlo.`);
+        }
+      } else {
+        await sendText(wa, `📄 *${work.name}*\n\n${work.description || "Sin descripción"}\n\n_(El PDF estará disponible pronto)_`);
+      }
+      await db.execute("UPDATE users SET state = 'WAITING_MORE', appointment_interest = ? WHERE phone = ?", [work.name, from]);
+      return;
+    }
   }
 
   // ── Si ya terminó, recordar ──
@@ -749,7 +858,23 @@ async function processMessage(db, from, msgType, payload, wa) {
 
         // Primero enviar el PDF
         if (work.pdf_url) {
-          await sendDocument(wa, work.pdf_url, `${work.name}.pdf`, `📄 ${work.name}\n\nCuando lo hayas revisado, envía cualquier mensaje para continuar.`);
+          try {
+            await sendDocument(wa, work.pdf_url, `${work.name}.pdf`, `📄 ${work.name}\n\nCuando lo hayas revisado, envía cualquier mensaje para continuar.`);
+          } catch (docErr) {
+            logger.error("Error enviando PDF de portafolio", {
+              workId,
+              workName: work.name,
+              pdfUrl: work.pdf_url,
+              waTo: wa.to,
+              error: docErr?.response?.data || docErr?.message || docErr,
+            });
+
+            await sendText(
+              wa,
+              `⚠️ No pude enviar el PDF de *${work.name}* en este momento.\n\n` +
+                "Nuestro equipo ya fue notificado para corregirlo."
+            );
+          }
         } else {
           await sendText(wa, `📄 *${work.name}*\n\n${work.description || "Sin descripción"}\n\n_(El PDF estará disponible pronto)_`);
         }
@@ -1160,7 +1285,18 @@ export const whatsappWebhookIdBot = onRequest(
       logger.info("Webhook body", JSON.stringify(body));
 
       const statuses = body?.entry?.[0]?.changes?.[0]?.value?.statuses;
-      if (Array.isArray(statuses) && statuses.length) return res.sendStatus(200);
+      if (Array.isArray(statuses) && statuses.length) {
+        statuses
+          .filter((statusItem) => statusItem?.status === "failed")
+          .forEach((statusItem) => {
+            logger.error("WhatsApp status failed", {
+              messageId: statusItem?.id,
+              recipientId: statusItem?.recipient_id,
+              errors: statusItem?.errors || [],
+            });
+          });
+        return res.sendStatus(200);
+      }
 
       const messages = body?.entry?.[0]?.changes?.[0]?.value?.messages;
       const from = messages?.[0]?.from;
@@ -1193,7 +1329,10 @@ export const whatsappWebhookIdBot = onRequest(
 
       return res.sendStatus(200);
     } catch (err) {
-      logger.error("Error webhook:", err?.response?.data || err);
+      logger.error("Error webhook:", {
+        error: err?.response?.data || err?.message || err,
+        stack: err?.stack,
+      });
       return res.sendStatus(200);
     }
   }
