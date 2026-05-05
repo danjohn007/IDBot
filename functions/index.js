@@ -201,6 +201,20 @@ async function sendContact(wa) {
             },
           ],
         },
+        {
+          name: {
+            formatted_name: "Dan Raso",
+            first_name: "Dan",
+            last_name: "Raso",
+          },
+          phones: [
+            {
+              phone: "+5214425986318",
+              wa_id: "5214425986318",
+              type: "CELL",
+            },
+          ],
+        },
       ],
     },
     { headers: headers(wa.token), timeout: 15000 }
@@ -371,10 +385,21 @@ function shouldRestartFlow(text) {
 }
 
 async function sendMainOptions(wa, greeting) {
-  await sendButtons(wa, greeting, [
-    { id: "opt_contacto", title: "📞 Contacto de Andy" },
-    { id: "opt_portafolio", title: "📂 Portafolio" },
-    { id: "opt_cita", title: "📅 Asignar una cita" },
+  await sendList(wa, greeting, "Ver opciones", [
+    {
+      title: "Contactos",
+      rows: [
+        { id: "opt_contacto_andy", title: "📞 Andy Raso" },
+        { id: "opt_contacto_dan", title: "📞 Dan Raso" },
+      ],
+    },
+    {
+      title: "Servicios",
+      rows: [
+        { id: "opt_portafolio", title: "📂 Portafolio", description: "Ver nuestros proyectos" },
+        { id: "opt_cita", title: "📅 Asignar una cita", description: "Agenda una reunión con nosotros" },
+      ],
+    },
   ]);
 }
 
@@ -395,6 +420,103 @@ async function sendAppointmentModeOptions(wa) {
       { id: "appt_mode_meet", title: "💻 Google Meet" },
     ]
   );
+}
+
+// ─── Helpers de fechas sugeridas ──────────────────────────────────────────────
+
+// Devuelve los próximos N días hábiles (lunes-viernes) a partir de mañana
+function getNextWeekdays(count) {
+  const days = [];
+  const cursor = new Date();
+  cursor.setHours(0, 0, 0, 0);
+  cursor.setDate(cursor.getDate() + 1); // empezar desde mañana
+
+  while (days.length < count) {
+    const dow = cursor.getDay();
+    if (dow >= 1 && dow <= 5) days.push(new Date(cursor));
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return days;
+}
+
+function dayNameEs(date) {
+  return ["Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"][date.getDay()];
+}
+
+// Parsea palabras relativas de fecha: "mañana", "hoy", "pasado mañana"
+// Devuelve un objeto { date, sqlDate, displayDate } o null
+function parseRelativeDateText(text) {
+  const norm = normalizeText(text);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  let d = null;
+  if (norm === "hoy") {
+    d = new Date(today);
+  } else if (norm === "manana" || norm === "mañana") {
+    d = new Date(today);
+    d.setDate(d.getDate() + 1);
+  } else if (norm.startsWith("pasado")) {
+    d = new Date(today);
+    d.setDate(d.getDate() + 2);
+  }
+
+  if (!d) return null;
+
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return { date: d, sqlDate: `${yyyy}-${mm}-${dd}`, displayDate: `${dd}/${mm}/${yyyy}` };
+}
+
+// Envía sugerencias de fecha como lista interactiva
+async function sendDateSuggestions(wa, prefixMsg = "") {
+  const nextDays = getNextWeekdays(5);
+
+  const rows = nextDays.map((d) => {
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    return {
+      id: `date_${yyyy}-${mm}-${dd}`,
+      title: `${dayNameEs(d)} ${dd}/${mm}`,   // máx 24 chars ✓
+      description: `${dd}/${mm}/${yyyy}`,
+    };
+  });
+
+  const body =
+    (prefixMsg ? prefixMsg + "\n\n" : "") +
+    "Elige una fecha de la lista o escríbela en formato *DD/MM/AAAA*.\n" +
+    "También puedes escribir *mañana* o *pasado mañana* 📅";
+
+  try {
+    await sendList(wa, body, "Ver fechas", [{ title: "Fechas disponibles", rows }]);
+  } catch (listErr) {
+    // Fallback: texto plano con las fechas sugeridas
+    const dateLines = rows.map((r) => `• ${r.title} (${r.description})`).join("\n");
+    await sendText(
+      wa,
+      body + "\n\n*Próximas fechas disponibles:*\n" + dateLines
+    );
+  }
+}
+
+// Envía sugerencias de horario como lista interactiva
+async function sendTimeSuggestions(wa, displayDate, prefixMsg = "") {
+  const slots = ["09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00"];
+  const rows = slots.map((t) => ({ id: `time_${t}`, title: `${t} hrs` }));
+
+  const dateLabel = displayDate ? ` para el *${displayDate}*` : "";
+  const body =
+    (prefixMsg ? prefixMsg + "\n\n" : "") +
+    `Elige un horario${dateLabel} o escríbelo en formato *HH:MM* (09:00 a 19:00) ⏰`;
+
+  try {
+    await sendList(wa, body, "Ver horarios", [{ title: "Horarios disponibles", rows }]);
+  } catch (listErr) {
+    const timeLines = rows.map((r) => `• ${r.title}`).join("  ");
+    await sendText(wa, body + "\n\n" + timeLines);
+  }
 }
 
 function parseDateInput(text) {
@@ -623,8 +745,31 @@ async function processMessage(db, from, msgType, payload, wa) {
 
   const user = rows[0];
 
-  // ── Reinicio de flujo según tipo de mensaje ──
-  // No interrumpir si el usuario está en medio del flujo de cita o registro
+  // ── "Hola" siempre cancela el flujo actual y reinicia desde el principio ──
+  if (msgType === "text" && isGreeting(text)) {
+    if (user.name && user.email && user.company) {
+      // Usuario registrado → resetear estado y mostrar menú principal
+      await db.execute(
+        "UPDATE users SET state = 'WAITING_OPTION', chosen_option = NULL, appointment_interest = NULL, appointment_mode = NULL, appointment_date = NULL, appointment_time = NULL WHERE phone = ?",
+        [from]
+      );
+      await sendMainOptions(
+        wa,
+        `¡Hola de nuevo *${user.name}*! 👋 Qué gusto verte por aquí otra vez.\n\n¿Qué te gustaría hacer?`
+      );
+    } else {
+      // Registro incompleto → volver a pedir nombre
+      await db.execute(
+        "UPDATE users SET state = 'WAITING_NAME', chosen_option = NULL, appointment_interest = NULL, appointment_mode = NULL, appointment_date = NULL, appointment_time = NULL WHERE phone = ?",
+        [from]
+      );
+      await sendText(wa, GREETING_MSG);
+    }
+    return;
+  }
+
+  // ── Reinicio de flujo por interés en producto o solicitud de info ──
+  // Solo aplica fuera de estados de registro y cita en curso
   const statesNoRestart = [
     "WAITING_APPOINTMENT_INTEREST",
     "WAITING_APPOINTMENT_MODE",
@@ -636,29 +781,19 @@ async function processMessage(db, from, msgType, payload, wa) {
     "WAITING_EVENT",
     "WAITING_COMPANY",
   ];
-  if (msgType === "text" && shouldRestartFlow(text) && !statesNoRestart.includes(user.state)) {
+  if (msgType === "text" && (hasIdInterest(text) || hasInfoRequest(text)) && !statesNoRestart.includes(user.state)) {
     if (user.name && user.email && user.company) {
       await db.execute(
         "UPDATE users SET state = 'WAITING_OPTION', chosen_option = NULL, appointment_interest = NULL, appointment_mode = NULL, appointment_date = NULL, appointment_time = NULL WHERE phone = ?",
         [from]
       );
-      // Si menciona un producto o pide información → sin botón de contacto
-      if (hasIdInterest(text) || hasInfoRequest(text)) {
-        await sendProductOptions(
-          wa,
-          `Hola *${user.name}* 👋 Con gusto te ayudo.\n\n¿Qué te gustaría hacer?`
-        );
-      } else {
-        // Saludo simple → menú completo con contacto
-        await sendMainOptions(
-          wa,
-          `¡Hola de nuevo *${user.name}*! 👋 Qué gusto verte por aquí otra vez.\n\n¿Qué te gustaría hacer?`
-        );
-      }
+      await sendProductOptions(
+        wa,
+        `Hola *${user.name}* 👋 Con gusto te ayudo.\n\n¿Qué te gustaría hacer?`
+      );
     } else {
-      // Datos incompletos → reiniciar registro
       await db.execute(
-        "UPDATE users SET state='WAITING_NAME', chosen_option=NULL, appointment_interest = NULL, appointment_mode = NULL, appointment_date = NULL, appointment_time = NULL WHERE phone = ?",
+        "UPDATE users SET state = 'WAITING_NAME', chosen_option = NULL, appointment_interest = NULL, appointment_mode = NULL, appointment_date = NULL, appointment_time = NULL WHERE phone = ?",
         [from]
       );
       await sendText(wa, GREETING_MSG);
@@ -669,10 +804,34 @@ async function processMessage(db, from, msgType, payload, wa) {
   // ── Botones de navegación global (funcionan desde cualquier estado) ──
   // Esto evita errores cuando el usuario regresa y presiona un botón de un mensaje anterior.
   if (buttonId && user.name) {
-    if (buttonId === "opt_contacto") {
+    if (buttonId === "opt_contacto_andy") {
       await db.execute("UPDATE users SET chosen_option = 'a', state = 'WAITING_AFTER_CONTACT' WHERE phone = ?", [from]);
-      await sendText(wa, "Te comparto el contacto de Andy Raso 📱\n\nEnvíale un mensaje para que te guarde en su agenda VIP.");
-      await sendContact(wa);
+      await sendText(wa, "Te comparto el contacto de *Andy Raso* 📱\n\nEnvíale un mensaje para que te guarde en su agenda VIP.");
+      await axios.post(
+        graphUrl(wa.phoneNumberId),
+        {
+          messaging_product: "whatsapp", to: wa.to, type: "contacts",
+          contacts: [{ name: { formatted_name: "Andy Raso", first_name: "Andy", last_name: "Raso" }, phones: [{ phone: "+5214422198567", wa_id: "5214422198567", type: "CELL" }] }],
+        },
+        { headers: headers(wa.token), timeout: 15000 }
+      );
+      await sendButtons(wa, "¿Qué quieres hacer ahora?", [
+        { id: "after_contact_portafolio", title: "📂 Ver portafolio" },
+        { id: "after_contact_cita", title: "📅 Agendar cita" },
+      ]);
+      return;
+    }
+    if (buttonId === "opt_contacto_dan") {
+      await db.execute("UPDATE users SET chosen_option = 'a', state = 'WAITING_AFTER_CONTACT' WHERE phone = ?", [from]);
+      await sendText(wa, "Te comparto el contacto de *Dan Raso* 📱\n\nEnvíale un mensaje para que te guarde en su agenda VIP.");
+      await axios.post(
+        graphUrl(wa.phoneNumberId),
+        {
+          messaging_product: "whatsapp", to: wa.to, type: "contacts",
+          contacts: [{ name: { formatted_name: "Dan Raso", first_name: "Dan", last_name: "Raso" }, phones: [{ phone: "+5214425986318", wa_id: "5214425986318", type: "CELL" }] }],
+        },
+        { headers: headers(wa.token), timeout: 15000 }
+      );
       await sendButtons(wa, "¿Qué quieres hacer ahora?", [
         { id: "after_contact_portafolio", title: "📂 Ver portafolio" },
         { id: "after_contact_cita", title: "📅 Agendar cita" },
@@ -791,14 +950,32 @@ async function processMessage(db, from, msgType, payload, wa) {
     // 5. Esperando opción (botón contacto/portafolio)
     // ───────────────────────────────────────────
     case "WAITING_OPTION": {
-      if (buttonId === "opt_contacto") {
-        // ── Opción A: Contacto de Andy ──
+      if (buttonId === "opt_contacto_andy") {
         await db.execute("UPDATE users SET chosen_option = 'a', state = 'WAITING_AFTER_CONTACT' WHERE phone = ?", [from]);
-        await sendText(
-          wa,
-          `Te comparto el contacto de Andy Raso 📱\n\nEnvíale un mensaje para que te guarde en su agenda VIP.`
+        await sendText(wa, "Te comparto el contacto de *Andy Raso* 📱\n\nEnvíale un mensaje para que te guarde en su agenda VIP.");
+        await axios.post(
+          graphUrl(wa.phoneNumberId),
+          {
+            messaging_product: "whatsapp", to: wa.to, type: "contacts",
+            contacts: [{ name: { formatted_name: "Andy Raso", first_name: "Andy", last_name: "Raso" }, phones: [{ phone: "+5214422198567", wa_id: "5214422198567", type: "CELL" }] }],
+          },
+          { headers: headers(wa.token), timeout: 15000 }
         );
-        await sendContact(wa);
+        await sendButtons(wa, "¿Qué quieres hacer ahora?", [
+          { id: "after_contact_portafolio", title: "📂 Ver portafolio" },
+          { id: "after_contact_cita", title: "📅 Agendar cita" },
+        ]);
+      } else if (buttonId === "opt_contacto_dan") {
+        await db.execute("UPDATE users SET chosen_option = 'a', state = 'WAITING_AFTER_CONTACT' WHERE phone = ?", [from]);
+        await sendText(wa, "Te comparto el contacto de *Dan Raso* 📱\n\nEnvíale un mensaje para que te guarde en su agenda VIP.");
+        await axios.post(
+          graphUrl(wa.phoneNumberId),
+          {
+            messaging_product: "whatsapp", to: wa.to, type: "contacts",
+            contacts: [{ name: { formatted_name: "Dan Raso", first_name: "Dan", last_name: "Raso" }, phones: [{ phone: "+5214425986318", wa_id: "5214425986318", type: "CELL" }] }],
+          },
+          { headers: headers(wa.token), timeout: 15000 }
+        );
         await sendButtons(wa, "¿Qué quieres hacer ahora?", [
           { id: "after_contact_portafolio", title: "📂 Ver portafolio" },
           { id: "after_contact_cita", title: "📅 Agendar cita" },
@@ -964,15 +1141,11 @@ async function processMessage(db, from, msgType, payload, wa) {
           wa,
           "Excelente, será una cita *presencial* 🙌\n\n" +
             `📍 Dirección: ${OFFICE_ADDRESS}\n` +
-            `🗺️ Ubicación: ${OFFICE_MAPS_URL}\n\n` +
-            "¡Te esperamos!"
+            `🗺️ Ubicación: ${OFFICE_MAPS_URL}\n\n` 
         );
       }
 
-      await sendText(
-        wa,
-        "Excelente. Ahora compárteme la fecha de tu cita en formato *DD/MM/AAAA* o *AAAA-MM-DD*."
-      );
+      await sendDateSuggestions(wa, "Excelente. ¿Qué fecha te viene bien para tu cita?");
       break;
     }
 
@@ -980,14 +1153,26 @@ async function processMessage(db, from, msgType, payload, wa) {
     // 10. Esperando fecha para la cita
     // ───────────────────────────────────────────
     case "WAITING_APPOINTMENT_DATE": {
-      if (msgType !== "text") {
-        await sendText(wa, "Por favor envíame la fecha en formato *DD/MM/AAAA* o *AAAA-MM-DD* 📅");
-        return;
+      let parsedDate = null;
+
+      // 1️⃣ Selección desde la lista de sugerencias (list_reply con id "date_YYYY-MM-DD")
+      if (buttonId && buttonId.startsWith("date_")) {
+        const isoDate = buttonId.replace("date_", ""); // YYYY-MM-DD
+        parsedDate = parseDateInput(isoDate);
       }
 
-      const parsedDate = parseDateInput(text);
+      // 2️⃣ Texto relativo: "mañana", "pasado mañana", "hoy"
+      if (!parsedDate && msgType === "text") {
+        parsedDate = parseRelativeDateText(text);
+      }
+
+      // 3️⃣ Formato DD/MM/AAAA o AAAA-MM-DD escrito manualmente
+      if (!parsedDate && msgType === "text") {
+        parsedDate = parseDateInput(text);
+      }
+
       if (!parsedDate) {
-        await sendText(wa, "No pude entender la fecha. Usa formato *DD/MM/AAAA* o *AAAA-MM-DD*.");
+        await sendDateSuggestions(wa, "No pude entender esa fecha 🤔");
         return;
       }
 
@@ -999,20 +1184,14 @@ async function processMessage(db, from, msgType, payload, wa) {
         parsedDate.date.getDate()
       );
       if (selectedOnly < todayOnly) {
-        await sendText(
-          wa,
-          "La fecha no puede ser en el pasado. Compárteme una fecha válida a partir de hoy."
-        );
+        await sendDateSuggestions(wa, "La fecha no puede ser en el pasado ⚠️ Elige una fecha disponible:");
         return;
       }
 
       const weekday = parsedDate.date.getDay();
       const isWeekday = weekday >= 1 && weekday <= 5;
       if (!isWeekday) {
-        await sendText(
-          wa,
-          "Esa fecha cae en fin de semana. Las citas son de *lunes a viernes* 🗓️\n\nCompárteme otra fecha."
-        );
+        await sendDateSuggestions(wa, "Esa fecha cae en fin de semana 🗓️ Las citas son de *lunes a viernes*. Elige otra:");
         return;
       }
 
@@ -1021,12 +1200,7 @@ async function processMessage(db, from, msgType, payload, wa) {
         [parsedDate.sqlDate, from]
       );
 
-      await sendText(
-        wa,
-        `¡Excelente! Para el *${parsedDate.displayDate}* ¿qué hora prefieres?\n\n` +
-          "Envíala en formato *HH:MM* (24 horas).\n" +
-          "Horario disponible: *09:00 a 19:00*"
-      );
+      await sendTimeSuggestions(wa, parsedDate.displayDate, "¡Excelente! ¿Qué horario prefieres?");
       break;
     }
 
@@ -1034,37 +1208,42 @@ async function processMessage(db, from, msgType, payload, wa) {
     // 11. Esperando hora para la cita
     // ───────────────────────────────────────────
     case "WAITING_APPOINTMENT_TIME": {
-      if (msgType !== "text") {
-        await sendText(wa, "Por favor escríbeme la hora en formato *HH:MM* (24 horas) ⏰");
-        return;
+      let parsedTime = null;
+
+      // 1️⃣ Selección desde la lista de horarios (list_reply con id "time_HH:MM")
+      if (buttonId && buttonId.startsWith("time_")) {
+        parsedTime = parseTimeInput(buttonId.replace("time_", ""));
       }
 
-      const parsedTime = parseTimeInput(text);
+      // 2️⃣ Texto escrito manualmente en formato HH:MM
+      if (!parsedTime && msgType === "text") {
+        parsedTime = parseTimeInput(text);
+      }
+
       if (!parsedTime) {
-        await sendText(
-          wa,
-          "La hora no es válida para agenda. Usa formato *HH:MM* entre *09:00 y 19:00* de lunes a viernes."
-        );
+        const dateLabel = user.appointment_date ? toSqlDateString(user.appointment_date) : null;
+        const display = dateLabel ? (() => { const [y,m,d] = dateLabel.split("-"); return `${d}/${m}/${y}`; })() : null;
+        await sendTimeSuggestions(wa, display, "No pude entender ese horario 🤔 Elige uno:");
         return;
       }
 
       if (!user.appointment_date) {
         await db.execute("UPDATE users SET state = 'WAITING_APPOINTMENT_DATE' WHERE phone = ?", [from]);
-        await sendText(wa, "Necesito confirmar primero la fecha. Compártemela en formato *DD/MM/AAAA* o *AAAA-MM-DD*.");
+        await sendDateSuggestions(wa, "Necesito confirmar la fecha de tu cita. Elige una opción:");
         return;
       }
 
       const appointmentDate = toSqlDateString(user.appointment_date);
       if (!appointmentDate) {
         await db.execute("UPDATE users SET state = 'WAITING_APPOINTMENT_DATE' WHERE phone = ?", [from]);
-        await sendText(wa, "No pude leer la fecha de la cita. Por favor compártemela de nuevo.");
+        await sendDateSuggestions(wa, "No pude leer la fecha guardada. Elige una nueva:");
         return;
       }
 
       const parsedDateFromDb = parseDateInput(appointmentDate);
       if (!parsedDateFromDb) {
         await db.execute("UPDATE users SET state = 'WAITING_APPOINTMENT_DATE', appointment_date = NULL WHERE phone = ?", [from]);
-        await sendText(wa, "La fecha guardada no es válida. Por favor vuelve a compartirla.");
+        await sendDateSuggestions(wa, "La fecha guardada no es válida. Elige una nueva:");
         return;
       }
 
@@ -1076,15 +1255,15 @@ async function processMessage(db, from, msgType, payload, wa) {
       if (!slotValidation.valid) {
         if (slotValidation.reason === "WEEKEND") {
           await db.execute("UPDATE users SET state = 'WAITING_APPOINTMENT_DATE', appointment_date = NULL WHERE phone = ?", [from]);
-          await sendText(wa, "La fecha de la cita cayó en fin de semana. Compárteme una nueva fecha de *lunes a viernes*.");
+          await sendDateSuggestions(wa, "La fecha cayó en fin de semana 🗓️ Elige una de *lunes a viernes*:");
           return;
         }
         if (slotValidation.reason === "OUT_OF_HOURS") {
-          await sendText(wa, "La hora está fuera del horario permitido. Usa *HH:MM* entre *09:00 y 19:00*.");
+          await sendTimeSuggestions(wa, parsedDateFromDb.displayDate, "Ese horario está fuera del rango permitido ⚠️ Elige uno disponible:");
           return;
         }
         if (slotValidation.reason === "PAST") {
-          await sendText(wa, "Esa hora ya pasó. Compárteme una hora futura en formato *HH:MM*.");
+          await sendTimeSuggestions(wa, parsedDateFromDb.displayDate, "Ese horario ya pasó ⚠️ Elige uno disponible:");
           return;
         }
       }
@@ -1120,7 +1299,7 @@ async function processMessage(db, from, msgType, payload, wa) {
     case "WAITING_APPOINTMENT_CONFIRM": {
       if (buttonId === "appt_confirm_no") {
         await db.execute("UPDATE users SET state = 'WAITING_APPOINTMENT_DATE', appointment_date = NULL, appointment_time = NULL WHERE phone = ?", [from]);
-        await sendText(wa, "Perfecto, actualicemos la agenda. Compárteme de nuevo la fecha en formato *DD/MM/AAAA* o *AAAA-MM-DD*.");
+        await sendDateSuggestions(wa, "Perfecto, elijamos otra fecha para tu cita 📅");
         return;
       }
 
@@ -1136,7 +1315,7 @@ async function processMessage(db, from, msgType, payload, wa) {
       const appointmentTime = toSqlTimeString(user.appointment_time);
       if (!appointmentDate || !appointmentTime) {
         await db.execute("UPDATE users SET state = 'WAITING_APPOINTMENT_DATE' WHERE phone = ?", [from]);
-        await sendText(wa, "Necesito reconfirmar la fecha y hora de la cita. Empecemos por la fecha.");
+        await sendDateSuggestions(wa, "Necesito reconfirmar la fecha de tu cita. Elige una:");
         return;
       }
 
@@ -1144,7 +1323,7 @@ async function processMessage(db, from, msgType, payload, wa) {
       const parsedTimeFromDb = parseSqlTimeParts(appointmentTime);
       if (!parsedDateFromDb || !parsedTimeFromDb) {
         await db.execute("UPDATE users SET state = 'WAITING_APPOINTMENT_DATE', appointment_date = NULL, appointment_time = NULL WHERE phone = ?", [from]);
-        await sendText(wa, "No pude validar la fecha y hora guardadas. Volvamos a agendar desde la fecha.");
+        await sendDateSuggestions(wa, "No pude validar la fecha guardada. Elige una nueva:");
         return;
       }
 
@@ -1157,7 +1336,7 @@ async function processMessage(db, from, msgType, payload, wa) {
         await db.execute("UPDATE users SET state = 'WAITING_APPOINTMENT_DATE', appointment_date = NULL, appointment_time = NULL WHERE phone = ?", [from]);
 
         if (finalValidation.reason === "WEEKEND") {
-          await sendText(wa, "La fecha de la cita no puede ser fin de semana. Elige una fecha de *lunes a viernes*.");
+          await sendDateSuggestions(wa, "La fecha de la cita no puede ser fin de semana 🗓️ Elige una de *lunes a viernes*:");
           return;
         }
         if (finalValidation.reason === "OUT_OF_HOURS") {
@@ -1165,7 +1344,7 @@ async function processMessage(db, from, msgType, payload, wa) {
           return;
         }
         if (finalValidation.reason === "PAST") {
-          await sendText(wa, "La cita quedó en el pasado. Vamos a reagendar con una fecha y hora futuras.");
+          await sendDateSuggestions(wa, "La cita quedó en el pasado ⚠️ Elige una nueva fecha:");
           return;
         }
       }
